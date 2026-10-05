@@ -35,6 +35,7 @@ This document describes the build, test, and deployment system for the `pulumi/r
    - [8.5 Dark Logo Variants](#85-dark-logo-variants)
    - [8.6 Provider API Docs Tests](#86-provider-api-docs-tests)
    - [8.7 Browser Tests (Cypress)](#87-browser-tests-cypress)
+     - [8.7.1 API Docs Crawl (mocha)](#871-api-docs-crawl-mocha)
    - [8.8 Link Checking](#88-link-checking)
 9. [Environment & Secret Management](#environment--secret-management)
    - [9.1 Pulumi ESC](#91-pulumi-esc)
@@ -726,9 +727,9 @@ Node version: 24.x; Hugo 0.157.0 installed.
 The check pipeline gives a contributor who adds one entry to `community-packages/package-list.json` an automated, security-reviewed fact-sheet before a maintainer approves. It runs in two planes that never share a job: a secret-free plane that touches contributor input, and a privileged plane that never runs contributor code. `community-package-policy.yml` fails CI if any workflow mixes the two (`SecretCodeSeparationTests`).
 
 - **`community-package-check.yml`** (`workflow_dispatch`, two jobs): its `check` job is the secret-free plane. It fetches the PR's file list with a read-only token, refuses the PR outright if it touches anything outside the allowlist, then reads the package's schema and docs at its latest GitHub release and probes without executing the package's code — installs the plugin (blocking), resolves the npm/PyPI/Go SDKs and lints the docs (advisory). It writes a fact-sheet artifact and a one-word verdict. The plugin install is the only blocking check, alongside successful docs generation and a present `docs/_index.md`.
-- Its `report` job (write token, no secrets, no contributor code) downloads that artifact and does two things: it edits the pinned fact-sheet comment in place, and it posts the verdict as a new comment. Editing notifies nobody, so without that second comment a contributor has to keep refreshing the page to learn the result.
+- Its `report` job (write token, no secrets, no contributor code) downloads that artifact and does two things: it edits the pinned fact-sheet comment in place, stamping it with the head it checked, and it posts the verdict as a new comment. Editing notifies nobody, so without that second comment a contributor has to keep refreshing the page to learn the result.
 - **`community-package-check-command.yml`** (`issue_comment`): dispatches a fresh check run when the author or a maintainer comments `/check` on its own line, authorized and rate-limited. It dispatches rather than re-runs, so the check also reaches a pull request whose own run GitHub parked.
-- **`community-package-sweep.yml`** (schedule, every 5 minutes): the check has no `pull_request` trigger, because a fork PR from a first-time contributor parks such a run in `action_required` until a maintainer approves it, leaving the contributor with no fact-sheet and nothing for `/check` to re-run. The sweep is the automatic trigger instead: it dispatches a check for every open package-list PR, once per head commit. A dispatched run starts in the base repo, so GitHub does not gate it. The sweep only dispatches: it never runs a contributor's code. If the sweep itself fails, it opens a `p1` issue that the daily priority digest surfaces, and leaves the existing one alone if there already is one.
+- **`community-package-sweep.yml`** (schedule, every 5 minutes): the check has no `pull_request` trigger, because a fork PR from a first-time contributor parks such a run in `action_required` until a maintainer approves it, leaving the contributor with no fact-sheet and nothing for `/check` to re-run. The sweep is the automatic trigger instead: it dispatches a check for every open package-list PR, once per head commit. It claims a head the moment it dispatches, by stamping the fact-sheet comment with it and leaving `⏳ Checking <head>` there until the check reports, and it skips a head that is already stamped. The claim lives on the pull request, which answers consistently. The Actions run list does not: while the sweep used that list as its record, matched by run title, it dropped a dispatched run often enough to re-check the same head hours later and post a second and third verdict comment. A dispatched run starts in the base repo, so GitHub does not gate it. The sweep only dispatches: it never runs a contributor's code. If the sweep itself fails, it opens a `p1` issue that the daily priority digest surfaces, and leaves the existing one alone if there already is one.
 - **`community-package-preview-command.yml`** (`issue_comment`): builds an on-demand site preview when a maintainer comments `/preview`. A fork's own `pull_request` build gets no secrets, so this maintainer-triggered run stands in for it: it materializes the fork's entry as data and reuses the `build-and-deploy-preview` action, never running the fork's code.
 - **`community-package-policy.yml`**: runs the toolchain's unit tests and `mypy --strict`, including the plane-separation test, on any PR touching the pipeline sources. It is not among `Sentinel Tower`'s `needs`, so it does not gate a merge today.
 
@@ -923,7 +924,7 @@ There are two publishers, a primary and a fallback.
 **What it does**:
 
 1. Reads the package YAMLs changed in the last commit (`git diff --name-only HEAD~1` against `themes/default/data/registry/packages/*.yaml`).
-2. Turns each into a `{source}/{publisher}/{name}@{version}` spec, skipping `DEPRECATED` publishers and the `azure-native-v*` / `aws-v<N>` legacy aliases.
+2. Turns each into a `{source}/{publisher}/{name}@{version}` spec, skipping packages with `deprecated: true` and the `azure-native-v*` / `aws-v<N>` legacy aliases.
 3. Pipes those specs through `registry-mirror-discover | registry-mirror-publish`, both installed with `go install` from `github.com/pulumi/registry-mirror-tools` at the commit pinned in `REGISTRY_MIRROR_TOOLS_COMMIT`. Retries up to 3 times with exponential backoff (10s to 30s).
 
 ### Fallback: `push-registry.py`
@@ -938,7 +939,7 @@ There are two publishers, a primary and a fallback.
 
 1. Reads all YAML files from `themes/default/data/registry/packages/*.yaml`.
 2. For each package:
-   - Skips packages where `publisher == "DEPRECATED"`.
+   - Skips packages with `deprecated: true`.
    - Skips packages whose name matches `azure-native-v*` (except `azure-native` itself) — these are aliases.
    - Skips packages whose name matches `aws-v<N>` — these are legacy versioned packages.
    - Calls the registry API above to check if this version already exists.
@@ -1039,21 +1040,28 @@ Node version in CI: 23.x. Go version: stable (latest).
 
 ### 8.7 Browser Tests (Cypress)
 
+**Config**: `cypress.config.js` — default base URL is `http://localhost:1313`. Specs live in `cypress/e2e/`.
+
+**Reporters**: `cypress-multi-reporters` (config in `reporter-config.json`).
+
+`scripts/run-browser-tests.sh <base-url> <specs> [retries]` runs one spec, or a comma-separated list, relative to `cypress/e2e/`. Every spec runs somewhere in CI:
+
+| Spec | Runs in | Against |
+|---|---|---|
+| `site.cy.js`, `structured-data.cy.js` | The smoke test in `scripts/ci/sync.sh`, after each preview and production S3 deploy | The deployed S3 website URL |
+| `test-provider-api-docs.cy.js` | The `test-provider-api-docs` PR job (`make test_provider_api_docs`, see 8.6) | A local Hugo server |
+| `opentofu-contract.cy.js` | `run-browser-tests.yml`, daily at 2:00 PM UTC | The live OpenTofu search API (the specs in `site.cy.js` stub it) |
+
+Don't point a large spec at `https://www.pulumi.com`. The CloudFront WAF blocks an IP after 500 requests in 5 minutes, and the distribution serves that block as the site's 404 page, so it looks like missing pages rather than rate limiting.
+
+#### 8.7.1 API Docs Crawl (mocha)
+
 ```bash
 make run-browser-tests
 # Runs: scripts/run-api-docs-tests.sh
 ```
 
-**Config**: `cypress.config.js` — default base URL is `http://localhost:1313`.
-
-**Test location**: `cypress/` directory.
-
-**Reporters**: `cypress-multi-reporters` (config in `reporter-config.json`).
-
-Browser tests are run:
-
-1. **As a smoke test inside `scripts/ci/sync.sh`** after each S3 deploy (both preview and production), using the deployed S3 website URL.
-2. **Daily at 2:00 PM UTC** via `run-browser-tests.yml` against the live production site.
+Despite the target name, this is not Cypress. It downloads the current production registry bucket to `public/` and runs the mocha suite in `scripts/tests/` over every package's API docs. It runs daily in `run-browser-tests.yml`, after the Cypress step, and takes roughly 40–60 minutes.
 
 ### 8.8 Link Checking
 

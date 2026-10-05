@@ -36,7 +36,7 @@ Common commands (all defined in the root `Makefile`):
 | Run Markdown linter only | `make lint-markdown` |
 | Check the generated dark logo variants | `make lint-dark-logos` |
 | Run provider API docs tests | `make test_provider_api_docs` |
-| Run browser tests | `make run-browser-tests` |
+| Run the API docs crawl (mocha, not Cypress) | `make run-browser-tests` |
 
 `make lint` must pass before merging. `make build` requires 32 GB+ RAM for a complete build; for single-provider work, use `make api-docs/<package>` instead.
 
@@ -80,7 +80,7 @@ Every package in the registry is described by a YAML file at `themes/default/dat
 
 The CI build script (`scripts/ci/build.sh`) writes to **`themes/default/content/registry/packages/`**.
 
-This difference is intentional — local API doc generation stays out of the Hugo theme tree. Within `themes/default/content/registry/packages/<pkg>/`, the `api-docs/` subdirectory is regenerated on every build and is git-ignored, so never commit it. The landing pages are different: `_index.md` — plus `installation-configuration.md` for the packages that have one, which is optional, since only `_index.md` is required — is committed and maintained by the `generate-package-metadata.yml` publish workflow, and bundled when onboarding a package so it renders before the next scheduled run. Do not hand-edit any of these files; regenerate them with `resourcedocsgen`.
+This difference is intentional — local API doc generation stays out of the Hugo theme tree. Within `themes/default/content/registry/packages/<pkg>/`, the `api-docs/` subdirectory is regenerated on every build and is git-ignored, so never commit it. The landing pages are different: `_index.md` — plus `installation-configuration.md` for the packages that have one, which is optional, since only `_index.md` is required — is committed and maintained by the `generate-package-metadata.yml` publish workflow, and bundled when onboarding a package so it renders before the next scheduled run. Do not hand-edit any of these files; regenerate them with `resourcedocsgen`. The exception is a short list of Pulumi packages whose landing pages live only in this repository and are edited here directly — see [Overview pages kept in this repository](docs/architecture.md#overview-pages-kept-in-this-repository).
 
 Additionally, `resourcedocsgen` writes **LLM docs** to **`llm-docs-out/registry/packages/`** (repo root, git-ignored). These are terminal-friendly markdown bundles (`llm-docs.json`) uploaded to S3 separately from the Hugo site. The LLM docs format is specified in `docs/llm-markdown-spec.md`.
 
@@ -101,6 +101,8 @@ To add or update a community provider package:
 1. Edit (or create) its YAML file in `themes/default/data/registry/packages/`.
 2. The scheduled `generate-package-metadata.yml` workflow handles version bumps automatically for community packages tracked in `community-packages/package-list.json`.
 3. First-party Pulumi provider repos trigger `publish-provider-update.yml` via `repository_dispatch`.
+
+**Dynamically bridged Terraform providers are not managed here.** These are the packages consumed with `pulumi package add terraform-provider <name>`; their YAML has a `schema_file_url` containing `registry.opentofu.org` and a `description` of the form `A Pulumi provider dynamically bridged from <name>.` They come from the internal `pulumi/terraform-to-pulumi-registry-pipeline` repo, which watches the providers listed under `watched-providers` in its `Pulumi.yaml` and sends a `push-provider-update` event whenever one ships a new version, regenerating the package YAML here. Adding, removing, or re-pointing one — for example, when an upstream provider moves to a new namespace — is an edit to that list, so file the issue or PR in `pulumi/terraform-to-pulumi-registry-pipeline`, not in this repo and not in `pulumi/pulumi-terraform-provider` (the Any Terraform Provider plugin itself). When you delist one here with `deprecated: true`, also take it off `watched-providers`. `resourcedocsgen metadata` won't overwrite a delisted package's YAML, but it posts a warning every time the pipeline pushes a new version. See [`docs/architecture.md`](docs/architecture.md#terraform-providers) for the full flow.
 
 On every push to `master`, `publish_to_registry.py` publishes packages to the live Pulumi registry service — the Pulumi Cloud store behind `pulumi package add`, which is separate from the rendered site. `push-registry.py` runs only if that step fails.
 
@@ -146,6 +148,6 @@ The one deliberate exception is the dark default border color, which sits in `@l
 
 - **Package manager**: Yarn only. Do not use npm or pnpm.
 - **Go modules**: `tools/resourcedocsgen/` is a separate Go module. Run `go test ./...` and `golangci-lint run` from within that directory (or use the Makefile targets).
-- **Generated content**: Files under `themes/default/content/registry/packages/` are generated — regenerate with `resourcedocsgen`, never hand-edit. The `api-docs/` subdirectories are git-ignored build output (never committed); the `_index.md` page — and `installation-configuration.md`, when the package has one — is committed metadata maintained by the publish workflow. Only `_index.md` is required; a package with just an overview is complete.
+- **Generated content**: Files under `themes/default/content/registry/packages/` are generated — regenerate with `resourcedocsgen`, never hand-edit. The `api-docs/` subdirectories are git-ignored build output (never committed); the `_index.md` page — and `installation-configuration.md`, when the package has one — is committed metadata maintained by the publish workflow. Only `_index.md` is required; a package with just an overview is complete. A few Pulumi packages' landing pages are hand-maintained here on purpose; they're listed in [`docs/architecture.md`](docs/architecture.md#overview-pages-kept-in-this-repository).
 - **Markdown line wrapping**: Put each paragraph and each list item on a **single line**. Do not hard-wrap prose to a column — let the editor soft-wrap it. A hard-wrapped paragraph re-flows when you change a word in the middle, so a one-word edit shows up as a multi-line diff and reviewers can't see what actually changed. This applies to every hand-written Markdown file in the repo: `README.md`, `AGENTS.md`, `BUILD-AND-DEPLOY.md`, everything under `docs/`, the PR and issue templates, and the skill files under `.claude/commands/`. Code inside fences, tables, and front matter keep whatever line structure they need; `CODE-OF-CONDUCT.md` is imported upstream and is left as-is.
 - **Branch naming**: Use `<GitHub Username>/<descriptive-name>` for branches in this repository.
